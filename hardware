@@ -1,0 +1,125 @@
+#include <WiFi.h>
+#include <Wire.h>
+#include <Firebase_ESP_Client.h>
+#include <Adafruit_AHTX0.h>
+#include <Adafruit_LIS3DH.h>
+#include <Adafruit_Sensor.h>
+#include <TinyGPSPlus.h>
+#include <HardwareSerial.h>
+#include <addons/TokenHelper.h>
+#include <addons/RTDBHelper.h>
+
+
+#define WIFI_SSID ""
+#define WIFI_PASSWORD ""
+#define API_KEY ""
+#define DATABASE_URL ""
+//#define USER_EMAIL ""
+//#define USER_PASSWORD ""
+
+FirebaseData fbdo;
+FirebaseAuth auth;
+FirebaseConfig config;
+
+#define MQ135_PIN 32
+#define MQ7_PIN   33
+#define GPS_RX    16
+#define GPS_TX    17
+
+Adafruit_AHTX0 aht;
+Adafruit_LIS3DH lis = Adafruit_LIS3DH();
+TinyGPSPlus gps;
+HardwareSerial GPSserial(1); 
+
+unsigned long sendDataPrevMillis = 0;
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  Serial.print("Connecting to Wi-Fi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(300);
+    Serial.print(".");
+  }
+  Serial.println("\nConnected! IP: " + WiFi.localIP().toString());
+
+ 
+  config.api_key = API_KEY;
+  config.database_url = DATABASE_URL;
+  //auth.user.email = USER_EMAIL;
+  //auth.user.password = USER_PASSWORD;
+  config.token_status_callback = tokenStatusCallback;
+
+  Firebase.reconnectNetwork(true);
+  fbdo.setBSSLBufferSize(4096, 1024);
+  fbdo.setResponseSize(2048);
+  Firebase.begin(&config, &auth);
+  Firebase.setDoubleDigits(5);
+  config.timeout.serverResponse = 10 * 1000;
+
+  // I2C
+  Wire.begin(21, 22);
+
+  // AHT10 Init
+  if (!aht.begin()) Serial.println("AHT10 not found!");
+  else Serial.println("AHT10 ready.");
+
+  // LIS3DH Init
+  if (!lis.begin(0x18)) Serial.println("LIS3DH not found!");
+  else {
+    lis.setRange(LIS3DH_RANGE_2_G);
+    lis.setDataRate(LIS3DH_DATARATE_50_HZ);
+    Serial.println("Accelerometer ready.");
+  }
+
+  // GPS Init
+  GPSserial.begin(9600, SERIAL_8N1, GPS_RX, GPS_TX);
+
+  // Analog resolution
+  analogReadResolution(12);
+}
+
+void loop() {
+  // --- Read Sensors ---
+  int mq135Val = analogRead(MQ135_PIN);
+  int mq7Val = analogRead(MQ7_PIN);
+
+  sensors_event_t humidity, temp;
+  aht.getEvent(&humidity, &temp);
+
+  lis.read();
+
+  while (GPSserial.available()) {
+    gps.encode(GPSserial.read());
+  }
+  if (Firebase.ready() && (millis() - sendDataPrevMillis > 10000 || sendDataPrevMillis == 0)) {
+    sendDataPrevMillis = millis();
+
+    FirebaseJson json;
+    json.set("MQ135", mq135Val);
+    json.set("MQ7", mq7Val);
+    json.set("Temperature", temp.temperature);
+    json.set("Humidity", humidity.relative_humidity);
+    json.set("Accel/X", lis.x);
+    json.set("Accel/Y", lis.y);
+    json.set("Accel/Z", lis.z);
+
+    if (gps.location.isUpdated()) {
+      json.set("GPS/Latitude", gps.location.lat());
+      json.set("GPS/Longitude", gps.location.lng());
+    } else {
+      json.add("GPS/Latitude").setJsonData("null");
+      json.add("GPS/Longitude").setJsonData("null");
+    }
+
+    if (Firebase.RTDB.setJSON(&fbdo, "/sensor_data", &json)) {
+      Serial.println("Data sent successfully");
+    } else {
+      Serial.println("Firebase setJSON failed: " + fbdo.errorReason());
+    }
+
+    Serial.println("-----");
+  }
+}
